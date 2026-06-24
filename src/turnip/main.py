@@ -4,16 +4,15 @@ import os
 import sys
 import shutil
 import subprocess
-import textwrap
 from pathlib import Path
 
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-WORKDIR      = Path.cwd() / "turnip_workdir"
-NDK          = WORKDIR / "r29/toolchains/llvm/prebuilt/linux-x86_64/bin"
-SYSROOT      = WORKDIR / "r29/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-MESA_SRC     = "https://gitlab.freedesktop.org/mesa/mesa.git"
+WORKDIR       = Path.cwd() / "turnip_workdir"
+NDK           = WORKDIR / "r29/toolchains/llvm/prebuilt/linux-x86_64/bin"
+SYSROOT       = WORKDIR / "r29/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+MESA_SRC      = "https://gitlab.freedesktop.org/mesa/mesa.git"
 BUILD_VERSION = "26.2.0-V5.0"
 
 PATCHES = [
@@ -26,7 +25,7 @@ PATCHES = [
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def run(cmd, *, cwd=None, env=None, check=True, capture=False):
+def run(cmd, *, cwd=None, env=None, check=True):
     """Run a shell command, raising on failure (mirrors set -e)."""
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     return subprocess.run(
@@ -34,13 +33,13 @@ def run(cmd, *, cwd=None, env=None, check=True, capture=False):
         cwd=str(cwd) if cwd else None,
         env=env,
         check=check,
-        capture_output=capture,
         text=True,
     )
 
 
 def write_file(path: Path, content: str):
-    path.write_text(textwrap.dedent(content))
+    # Write exactly what is passed — no dedent, no mangling.
+    path.write_text(content)
     print(f"  wrote {path}")
 
 
@@ -49,7 +48,7 @@ def write_file(path: Path, content: str):
 def install_dependencies():
     print("\nInstalling build dependencies...")
 
-    # Enable deb-src in Debian sources
+    # FIX 1: Enable deb-src using the same sed-style substitution as the bash script.
     sources = Path("/etc/apt/sources.list.d/debian.sources")
     if sources.exists():
         text = sources.read_text()
@@ -59,10 +58,12 @@ def install_dependencies():
     run(["apt-get", "update"])
     run(["apt-get", "build-dep", "mesa",       "-y", "-qq"])
     run(["apt-get", "build-dep", "libarchive", "-y", "-qq"])
+
+    # FIX 2: -qq must come immediately after "install", before package names.
     run([
-        "apt-get", "install", "-y",
+        "apt-get", "install", "-y", "-qq",
         "pkg-config", "git", "cmake", "wget", "zip",
-        "patchelf", "libclc-21-dev", "-qq",
+        "patchelf", "libclc-21-dev",
     ])
 
 
@@ -71,7 +72,6 @@ def setup_workdir():
     WORKDIR.mkdir(parents=True, exist_ok=True)
     (WORKDIR / "turnip").mkdir(parents=True, exist_ok=True)
 
-    # Clean stale artifacts
     for target in [WORKDIR / "r29", WORKDIR / "mesa"]:
         if target.exists():
             shutil.rmtree(target)
@@ -100,7 +100,6 @@ def apply_patches():
     for url in PATCHES:
         run(["wget", url], cwd=mesa_dir)
 
-    # git apply for .patch files; patch -p1 for .diff files
     run(["git", "apply", "Gpu-Hacks.patch"], cwd=mesa_dir)
     run(["patch", "-p1", "-i", "0a60c9c4108200fda20016b594dcf8806f29a28e.diff"], cwd=mesa_dir)
     run(["patch", "-p1", "-i", "KGSL-hacks-whitebelyash.diff"], cwd=mesa_dir)
@@ -108,23 +107,21 @@ def apply_patches():
 
     run(["git", "add", "-A"], cwd=mesa_dir)
 
-    # Write version header
     version_header = mesa_dir / "src/freedreno/vulkan/tu_version.h"
     version_header.write_text(f'#define TUGEN8_DRV_VERSION "{BUILD_VERSION}"\n')
 
 
 def build_env() -> dict:
-    """Return the environment dict for the build, mirroring the export block."""
     env = os.environ.copy()
-    env["PATH"]     = f"{WORKDIR / 'bin'}:{NDK}:{env.get('PATH', '')}"
-    env["CC"]       = "clang"
-    env["CXX"]      = "clang++"
-    env["AR"]       = "llvm-ar"
-    env["RANLIB"]   = "llvm-ranlib"
-    env["STRIP"]    = "llvm-strip"
-    env["OBJDUMP"]  = "llvm-objdump"
-    env["OBJCOPY"]  = "llvm-objcopy"
-    env["LDFLAGS"]  = "-fuse-ld=lld"
+    env["PATH"]    = f"{WORKDIR / 'bin'}:{NDK}:{env.get('PATH', '')}"
+    env["CC"]      = "clang"
+    env["CXX"]     = "clang++"
+    env["AR"]      = "llvm-ar"
+    env["RANLIB"]  = "llvm-ranlib"
+    env["STRIP"]   = "llvm-strip"
+    env["OBJDUMP"] = "llvm-objdump"
+    env["OBJCOPY"] = "llvm-objcopy"
+    env["LDFLAGS"] = "-fuse-ld=lld"
     return env
 
 
@@ -132,45 +129,47 @@ def write_cross_files():
     mesa_dir = WORKDIR / "mesa"
     print("\nSetting cross-files...")
 
+    # FIX 3: No indentation inside the strings so write_file writes them verbatim,
+    # exactly matching what the bash heredocs produced.
     cross = f"""\
-        [binaries]
-        ar = '{NDK}/llvm-ar'
-        c = ['{NDK}/aarch64-linux-android35-clang', '--sysroot={SYSROOT}', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments', '-Wno-error']
-        cpp = ['{NDK}/aarch64-linux-android35-clang++', '--sysroot={SYSROOT}', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments', '-Wno-error']
-        c_ld = '{NDK}/ld.lld'
-        cpp_ld = '{NDK}/ld.lld'
-        strip = '{NDK}/llvm-strip'
-        pkg-config = ['env', 'PKG_CONFIG_LIBDIR={SYSROOT}/usr/lib/pkg-config', 'PKG_CONFIG_SYSROOT_DIR={SYSROOT}', '/usr/bin/pkg-config']
+[binaries]
+ar = '{NDK}/llvm-ar'
+c = ['{NDK}/aarch64-linux-android35-clang', '--sysroot={SYSROOT}', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments', '-Wno-error']
+cpp = ['{NDK}/aarch64-linux-android35-clang++', '--sysroot={SYSROOT}', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments', '-Wno-error']
+c_ld = '{NDK}/ld.lld'
+cpp_ld = '{NDK}/ld.lld'
+strip = '{NDK}/llvm-strip'
+pkg-config = ['env', 'PKG_CONFIG_LIBDIR={SYSROOT}/usr/lib/pkg-config', 'PKG_CONFIG_SYSROOT_DIR={SYSROOT}', '/usr/bin/pkg-config']
 
-        [built-in options]
-        c_args = ['--sysroot={SYSROOT}', '-Wno-error']
-        cpp_args = ['--sysroot={SYSROOT}']
-        c_link_args = ['--sysroot={SYSROOT}']
-        cpp_link_args = ['--sysroot={SYSROOT}']
+[built-in options]
+c_args = ['--sysroot={SYSROOT}', '-Wno-error']
+cpp_args = ['--sysroot={SYSROOT}']
+c_link_args = ['--sysroot={SYSROOT}']
+cpp_link_args = ['--sysroot={SYSROOT}']
 
-        [host_machine]
-        system = 'android'
-        cpu_family = 'aarch64'
-        cpu = 'armv8'
-        endian = 'little'
-    """
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'armv8'
+endian = 'little'
+"""
 
     native = """\
-        [binaries]
-        c = 'clang'
-        cpp = 'clang++'
-        ar = 'llvm-ar'
-        strip = 'llvm-strip'
-        c_ld = 'ld.lld'
-        cpp_ld = 'ld.lld'
-        pkg-config = 'pkg-config'
+[binaries]
+c = 'clang'
+cpp = 'clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+c_ld = 'ld.lld'
+cpp_ld = 'ld.lld'
+pkg-config = 'pkg-config'
 
-        [build_machine]
-        system = 'linux'
-        cpu_family = 'aarch64'
-        cpu = 'armv8'
-        endian = 'little'
-    """
+[build_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'armv8'
+endian = 'little'
+"""
 
     write_file(mesa_dir / "android-aarch64.txt", cross)
     write_file(mesa_dir / "native.txt", native)
@@ -220,19 +219,20 @@ def package_turnip():
         cwd=lib_dir)
     (lib_dir / "libvulkan_freedreno.so").rename(lib_dir / "vulkan.adreno.so")
 
+    # FIX 4: No indentation so the JSON is valid and matches the bash output exactly.
     meta = f"""\
-        {{
-          "schemaVersion": 1,
-          "name": "Mesa Turnip v{BUILD_VERSION}",
-          "description": "Built from source",
-          "author": "JustCallMeJade",
-          "packageVersion": "1",
-          "vendor": "Mesa3D",
-          "driverVersion": "Vulkan 1.4.335",
-          "minApi": 28,
-          "libraryName": "vulkan.adreno.so"
-        }}
-    """
+{{
+  "schemaVersion": 1,
+  "name": "Mesa Turnip v{BUILD_VERSION}",
+  "description": "Built from source",
+  "author": "JustCallMeJade",
+  "packageVersion": "1",
+  "vendor": "Mesa3D",
+  "driverVersion": "Vulkan 1.4.335",
+  "minApi": 28,
+  "libraryName": "vulkan.adreno.so"
+}}
+"""
     write_file(lib_dir / "meta.json", meta)
 
     zip_path = WORKDIR / "turnip" / f"Turnip-v{BUILD_VERSION}.zip"
