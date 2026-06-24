@@ -251,6 +251,16 @@ def github_actions_export():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    if "--version" in sys.argv:
+        print("turnip-builder 1.0.0")
+        return
+
+    if "--help" in sys.argv:
+        print("Usage:")
+        print("  build-now")
+        print("  build-now --version")
+        return
+
     print("Only works on Debian ARM64!!! Press Ctrl+C to exit.")
 
     install_dependencies()
