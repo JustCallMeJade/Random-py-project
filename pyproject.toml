@@ -9,4 +9,4 @@ description = "Lazy me"
 requires-python = ">=3.10"
 
 [project.scripts]
-build-now = "turnip_builder.main:main"
+build-now = "turnip.main:main"
